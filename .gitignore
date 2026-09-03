@@ -1,0 +1,20 @@
+# Backend
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.db
+backend/.env
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo
+frontend/next-env.d.ts
+
+# OS / editor
+.DS_Store
+*.log
+
+# Claude Code local state
+.claude/

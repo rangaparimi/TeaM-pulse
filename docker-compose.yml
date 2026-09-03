@@ -1,0 +1,36 @@
+services:
+  backend:
+    build: ./backend
+    container_name: team-pulse-new-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Docker-mode overrides — the rest of the AI/GitHub keys still come
+      # from backend/.env via env_file above. DATABASE_URL must win over
+      # whatever's in .env (usually the local-dev relative path) or SQLite
+      # writes inside the container's ephemeral layer instead of the
+      # mounted volume, silently losing data on every recreate.
+      DATABASE_URL: sqlite:////app/data/team_pulse.db
+      CORS_ORIGINS: http://localhost:3000
+      FRONTEND_URL: http://localhost:3000
+      GITHUB_OAUTH_REDIRECT_URI: http://localhost:8000/auth/github/callback
+    volumes:
+      - backend_data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: team-pulse-new-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_data:
