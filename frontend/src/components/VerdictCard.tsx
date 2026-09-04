@@ -10,6 +10,7 @@ import { ConfidenceMeter } from "./ConfidenceMeter";
 import { SkillTagPill } from "./SkillTagPill";
 import { EvidenceList } from "./EvidenceList";
 import { LearningPathTableView } from "./LearningPathTableView";
+import { FilePreviewButton } from "./FilePreviewModal";
 
 const STATUS_OPTIONS: MatchStatus[] = ["ON_TRACK", "PARTIALLY_ON_TRACK", "OFF_TRACK"];
 
@@ -85,7 +86,12 @@ export function VerdictCard({
           <p className="text-xs font-medium uppercase tracking-wide text-muted">
             Assigned: {learningPath.title}
             {learningPath.source_filename && (
-              <span className="ml-1.5 normal-case text-muted">(from {learningPath.source_filename})</span>
+              <span className="ml-1.5 inline-flex items-center gap-1.5 normal-case text-muted">
+                (from {learningPath.source_filename})
+                {learningPath.has_file && (
+                  <FilePreviewButton learningPathId={learningPath.id} filename={learningPath.source_filename} />
+                )}
+              </span>
             )}
           </p>
           <p className="mt-1 text-sm">{learningPath.description}</p>

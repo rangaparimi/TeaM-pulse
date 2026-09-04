@@ -1,6 +1,7 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app import deps, document_service, models, schemas
@@ -48,13 +49,25 @@ async def create_learning_path_from_file(
     period_end: date = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    mentor: models.User = Depends(deps.require_mentor),
+    user: models.User = Depends(deps.get_current_user),
 ):
     """Same as POST /learning-paths, but the description is distilled from
     an uploaded Excel/PDF/image/text file instead of being typed directly —
     see document_service.extract_from_file for how each format is handled.
+
+    Unlike the plain-text endpoint, a manager (not just the intern's direct
+    mentor) may assign one too, as long as the intern is under one of their
+    teams — ensure_can_access_intern() covers both cases. The intern
+    themself is explicitly excluded: they can access their own record for
+    read purposes, but assigning their own expectations would defeat the
+    self-report-vs-evidence design.
     """
-    _ensure_is_mentor_of(mentor, intern_id, db)
+    intern = db.get(models.Intern, intern_id)
+    if not intern:
+        raise HTTPException(status_code=404, detail="Intern not found")
+    deps.ensure_can_access_intern(user, intern)
+    if user.role not in ("mentor", "manager"):
+        raise HTTPException(status_code=403, detail="Only a mentor or manager can assign a learning path")
 
     ext = document_service.extension_of(file.filename or "")
     if ext not in document_service.SUPPORTED_EXTENSIONS:
@@ -71,10 +84,12 @@ async def create_learning_path_from_file(
 
     learning_path = models.LearningPath(
         intern_id=intern_id,
-        mentor_id=mentor.id,
+        mentor_id=intern.mentor_id,
         title=title,
         description=result.summary,
         source_filename=file.filename,
+        source_file=data,
+        source_content_type=document_service.MIME_TYPES.get(ext, "application/octet-stream"),
         extracted_table=result.table,
         period_start=period_start,
         period_end=period_end,
@@ -113,3 +128,25 @@ def get_learning_path(
         raise HTTPException(status_code=404, detail="Learning path not found")
     deps.ensure_can_access_intern(user, learning_path.intern)
     return learning_path
+
+
+@router.get("/{learning_path_id}/file")
+def get_learning_path_file(
+    learning_path_id: int, db: Session = Depends(get_db), user: models.User = Depends(deps.get_current_user)
+):
+    """Serves the original uploaded file back, for the "preview" UI —
+    inline so the browser renders images/PDFs/text directly instead of
+    downloading them.
+    """
+    learning_path = db.get(models.LearningPath, learning_path_id)
+    if not learning_path:
+        raise HTTPException(status_code=404, detail="Learning path not found")
+    deps.ensure_can_access_intern(user, learning_path.intern)
+    if not learning_path.source_file:
+        raise HTTPException(status_code=404, detail="No file was uploaded for this learning path")
+
+    return Response(
+        content=learning_path.source_file,
+        media_type=learning_path.source_content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{learning_path.source_filename or "file"}"'},
+    )

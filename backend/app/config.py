@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     session_cookie_name: str = "tp_session"
     session_max_age_days: int = 30
 
+    # Interns (GitHub-login only) get a much shorter session than
+    # mentors/managers — this is the "cache timeout" after which they're
+    # forced to log in again. Doesn't affect mentor/manager sessions, which
+    # still run the full session_max_age_days.
+    intern_session_max_age_minutes: int = 60
+
     # Lets you log in as any user without a real GitHub OAuth round-trip —
     # useful before you've registered an OAuth App, or for quickly switching
     # between demo accounts. Set to false to remove this endpoint entirely.

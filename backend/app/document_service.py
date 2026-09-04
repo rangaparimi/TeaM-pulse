@@ -154,6 +154,10 @@ MIME_TYPES = {
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
     "webp": "image/webp",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
 }
 
 

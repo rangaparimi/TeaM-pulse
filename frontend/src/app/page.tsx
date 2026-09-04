@@ -6,19 +6,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { GitFork, Loader2, LogIn, ShieldCheck, Sparkles, Target } from "lucide-react";
 import { api, API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/useAuth";
+import type { DemoLogin } from "@/lib/types";
 
-type DemoLogin =
-  | { kind: "email"; email: string; label: string; role: string }
-  | { kind: "github"; github_login: string; label: string; role: string };
-
-const DEMO_LOGINS: DemoLogin[] = [
-  { kind: "email", email: "alex.rivera@teampulse.dev", label: "Alex Rivera", role: "manager" },
-  { kind: "email", email: "priya.singh@teampulse.dev", label: "Priya Singh", role: "mentor" },
-  { kind: "email", email: "devon.okafor@teampulse.dev", label: "Devon Okafor", role: "mentor" },
-  { kind: "github", github_login: "demo-asha", label: "Asha Kumar", role: "intern" },
-  { kind: "github", github_login: "demo-marcus", label: "Marcus Chen", role: "intern" },
-  { kind: "github", github_login: "demo-wei", label: "Wei Zhang", role: "intern" },
-];
+const ROLE_ORDER = ["manager", "mentor", "intern"];
+const ROLE_LABEL: Record<string, string> = { manager: "Managers", mentor: "Mentors", intern: "Interns" };
 
 function EmailLoginForm() {
   const [email, setEmail] = useState("");
@@ -80,6 +71,11 @@ export default function LandingPage() {
   const router = useRouter();
   const { data: auth, isLoading } = useAuth();
   const { data: status } = useQuery({ queryKey: ["status"], queryFn: api.status });
+  const { data: devLoginUsers } = useQuery({
+    queryKey: ["dev-login-users"],
+    queryFn: api.listDevLoginUsers,
+    enabled: !!status?.dev_login_enabled,
+  });
   const [customLogin, setCustomLogin] = useState("");
 
   useEffect(() => {
@@ -160,21 +156,30 @@ export default function LandingPage() {
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Dev login (testing convenience — bypasses real GitHub OAuth and email/password)
           </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {DEMO_LOGINS.map((d) => (
-              <a
-                key={d.label}
-                href={
-                  d.kind === "email"
-                    ? `${API_URL}/auth/dev/login?email=${encodeURIComponent(d.email)}`
-                    : `${API_URL}/auth/dev/login?github_login=${d.github_login}`
-                }
-                className="rounded-full border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/5 dark:hover:bg-white/5"
-              >
-                {d.label} <span className="text-muted">({d.role})</span>
-              </a>
-            ))}
-          </div>
+          {ROLE_ORDER.map((role) => {
+            const usersForRole = (devLoginUsers ?? []).filter((d) => d.role === role);
+            if (usersForRole.length === 0) return null;
+            return (
+              <div key={role} className="mt-3">
+                <p className="text-[11px] font-medium text-muted">{ROLE_LABEL[role] ?? role}</p>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {usersForRole.map((d: DemoLogin) => (
+                    <a
+                      key={`${d.kind}-${d.kind === "email" ? d.email : d.github_login}`}
+                      href={
+                        d.kind === "email"
+                          ? `${API_URL}/auth/dev/login?email=${encodeURIComponent(d.email)}`
+                          : `${API_URL}/auth/dev/login?github_login=${d.github_login}`
+                      }
+                      className="rounded-full border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/5 dark:hover:bg-white/5"
+                    >
+                      {d.label}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
           <form
             className="mt-3 flex gap-2"
             onSubmit={(e) => {

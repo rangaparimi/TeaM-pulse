@@ -1,6 +1,7 @@
 import type {
   AuthStatus,
   CohortSummary,
+  DemoLogin,
   Intern,
   InviteInfo,
   LearningPath,
@@ -12,6 +13,7 @@ import type {
   TimelineEntry,
   User,
   Verdict,
+  VerdictStreamEvent,
 } from "./types";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -39,6 +41,7 @@ export const api = {
   status: () => request<ServiceStatus>("/"),
 
   authStatus: () => request<AuthStatus>("/auth/me/status"),
+  listDevLoginUsers: () => request<DemoLogin[]>("/auth/dev/users"),
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   emailLogin: (email: string, password: string) =>
     request<User>("/auth/email/login", { method: "POST", body: JSON.stringify({ email, password }) }),
@@ -51,6 +54,8 @@ export const api = {
     request<Intern>("/users/me/intern-profile", { method: "POST", body: JSON.stringify(payload) }),
 
   listInterns: () => request<Intern[]>("/interns"),
+  listUnassignedInterns: () => request<Intern[]>("/interns/unassigned"),
+  claimIntern: (internId: number) => request<Intern>(`/interns/${internId}/claim`, { method: "POST" }),
   getIntern: (id: number) => request<Intern>(`/interns/${id}`),
   updateIntern: (id: number, payload: { mentor_id?: number; repo?: string }) =>
     request<Intern>(`/interns/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
@@ -67,6 +72,15 @@ export const api = {
   listTeams: () => request<TeamWithMentors[]>("/admin/teams"),
   createTeam: (name: string) => request<Team>("/admin/teams", { method: "POST", body: JSON.stringify({ name }) }),
   listAllMentors: () => request<User[]>("/admin/mentors"),
+  mentorInterns: (mentorId: number) => request<Intern[]>(`/admin/mentors/${mentorId}/interns`),
+  listUnassignedInternsOrgWide: () => request<Intern[]>("/admin/interns/unassigned"),
+  assignInternToMentor: (internId: number, mentorId: number) =>
+    request<Intern>(`/admin/interns/${internId}/assign-mentor`, {
+      method: "POST",
+      body: JSON.stringify({ mentor_id: mentorId }),
+    }),
+  orgWideInterns: () => request<Intern[]>("/admin/interns"),
+  orgWideReviewQueue: () => request<Verdict[]>("/admin/review-queue"),
   assignMentorTeam: (userId: number, teamId: number | null) =>
     request<User>(`/admin/mentors/${userId}/team`, { method: "POST", body: JSON.stringify({ team_id: teamId }) }),
   promoteToManager: (userId: number) => request<User>(`/admin/users/${userId}/promote`, { method: "POST" }),
@@ -103,6 +117,42 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ learning_path_id: learningPathId }),
     }),
+
+  // Streams narrated progress (evidence lookup, AI provider call, etc.) as
+  // SSE events instead of returning only the final verdict. `force: true`
+  // discards an existing verdict and reruns from scratch.
+  streamGenerateVerdict: async (
+    learningPathId: number,
+    force: boolean,
+    onEvent: (event: VerdictStreamEvent) => void
+  ): Promise<void> => {
+    const res = await fetch(`${API_URL}/verdicts/generate/stream`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ learning_path_id: learningPathId, force }),
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`POST /verdicts/generate/stream failed (${res.status}): ${body}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() ?? "";
+      for (const chunk of chunks) {
+        const line = chunk.trim();
+        if (!line.startsWith("data:")) continue;
+        const jsonStr = line.slice("data:".length).trim();
+        if (jsonStr) onEvent(JSON.parse(jsonStr) as VerdictStreamEvent);
+      }
+    }
+  },
 
   listVerdicts: (internId?: number) =>
     request<Verdict[]>(`/verdicts${internId ? `?intern_id=${internId}` : ""}`),

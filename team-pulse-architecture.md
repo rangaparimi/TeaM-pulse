@@ -44,10 +44,34 @@ Both identity mechanisms converge on the same signed session cookie
 mechanism produced the logged-in user. Passwords are PBKDF2-HMAC-SHA256
 hashed (stdlib only — no bcrypt/argon2 native-build dependency).
 
+**Session length is role-dependent.** The cookie itself is signed with a
+single generous ceiling (`SESSION_MAX_AGE_DAYS`, 30 days) so `itsdangerous`
+can decode it at all, but `deps.get_current_user_optional` separately checks
+the embedded issue timestamp against a much shorter limit
+(`INTERN_SESSION_MAX_AGE_MINUTES`, default 60) *only* for `role == "intern"`
+— once that's exceeded, the intern is treated as logged out (their cookie is
+proactively cleared) even though the signature itself is still valid.
+Mentors/managers are unaffected and run the full 30-day window. The
+frontend's `useAuth` hook polls `/auth/me/status` every 60 seconds so an
+idle intern tab notices the expiry and redirects to login without needing a
+manual action to trigger the check.
+
+**GitHub login always forces account selection.** `/auth/github/login`
+appends `prompt=select_account` to the GitHub authorize URL — without it,
+GitHub silently reuses whichever GitHub account the browser already has a
+session for (skipping the login screen entirely if that account previously
+authorized the app), which is wrong on a shared machine where a different
+intern wants to sign in with their own account.
+
 A `dev/login` backdoor (`ENABLE_DEV_LOGIN`, on by default) bypasses both
 mechanisms for testing: by GitHub-style username (auto-creates a fresh
 intern) or by email (must already exist — it doesn't fabricate mentor/manager
-accounts, since those are meant to come from a real invite).
+accounts, since those are meant to come from a real invite). The landing
+page's dev-login panel is populated from `GET /auth/dev/users`, which lists
+every current user grouped by role — not a hardcoded seed list, so newly
+added mentors and newly onboarded interns show up automatically. Both
+endpoints 404 (not just return an empty list) when dev login is disabled, so
+a real deployment never exposes the user roster unauthenticated.
 
 ### Org hierarchy
 
@@ -58,9 +82,17 @@ Manager ──creates──> Team ──has many──> Mentor ──mentors─�
 ```
 
 A manager owns **Teams**; each **mentor** belongs to at most one team; each
-**intern** picks a mentor at onboarding. An intern's displayed "team" is
-derived — whichever team their mentor belongs to — not a field an intern
-sets directly.
+**intern** picks a mentor at onboarding — or leaves it unassigned
+("Unassigned — pick later"). An intern's displayed "team" is derived —
+whichever team their mentor belongs to — not a field an intern sets
+directly.
+
+**Unassigned interns aren't a dead end.** They're visible in two places,
+both intersecting the same underlying pool (`mentor_id IS NULL`): a
+mentor's own dashboard (self-claim via `POST /interns/{id}/claim`) and the
+manager's dashboard (directed assignment to any mentor on one of the
+manager's teams via `POST /admin/interns/{id}/assign-mentor`). Neither path
+requires the intern to do anything further once they've onboarded.
 
 ---
 
@@ -107,23 +139,36 @@ sets directly.
 │      reasoning + skill tags                                         │
 │  Provider chain: NVIDIA NIM (primary) → Gemini (backup) →           │
 │  rule-based mock (last resort). Every verdict records which one     │
-│  actually produced it. app/llm_service.py                           │
+│  actually produced it. Streamed step-by-step over SSE               │
+│  (POST /verdicts/generate/stream) instead of a single blocking      │
+│  call, so the UI can narrate progress live. A verdict can be        │
+│  rerun (force=true): discards the old verdict + cached evidence     │
+│  for that period first, so it's a genuinely fresh pass.             │
+│  app/llm_service.py, app/routers/verdicts.py                        │
 └────────────────────┬─────────────────────────────────────────────┘
                       ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │                    HUMAN-IN-THE-LOOP QUEUE                          │
 │  Anything below the confidence threshold, or flagged OFF_TRACK,     │
-│  goes to the mentor's review queue (scoped to their own interns).   │
-│  Mentor can confirm the AI verdict or override it with a note.      │
-│  Everything above threshold auto-publishes to dashboards.           │
+│  goes to a review queue — scoped to a mentor's own interns          │
+│  (GET /verdicts/queue) or, for a manager, every intern across       │
+│  every team they own (GET /admin/review-queue). Mentor can confirm  │
+│  the AI verdict or override it with a note. Everything above       │
+│  threshold auto-publishes to dashboards.                            │
 └────────────────────┬─────────────────────────────────────────────┘
                       ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │                          DASHBOARDS                                  │
-│  Intern view: growth timeline, skill tags, learning-path history    │
-│  Mentor view: review queue, own-interns roster, cohort distribution │
+│  Intern view: growth timeline, skill tags, learning-path history,   │
+│  original-file preview                                              │
+│  Mentor view: review queue, own-interns roster (+ unassigned-intern │
+│  self-claim), cohort distribution                                   │
 │  Manager view (visually distinct): teams, mentor roster, promotion, │
-│  org-wide aggregate — never confused with the mentor's own view     │
+│  org-wide aggregate with click-through detail popups per stat,      │
+│  an expandable team → mentor → intern → learning-path tree inline   │
+│  (rerun a verdict or assign a file-based learning path to any       │
+│  intern without leaving the page), and unassigned-intern routing —  │
+│  never confused with the mentor's own view                          │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -142,9 +187,11 @@ sets directly.
   `intern.mentor.team_name`.
 - **LearningPath** — id, intern_id, mentor_id, title, description,
   source_filename (nullable — set when created from an uploaded file),
-  extracted_table (nullable JSON — `{headers, rows}`), period_start,
-  period_end. `description` is the single field the AI comparison reads,
-  regardless of whether it was typed or extracted from a file.
+  source_file (nullable BLOB — the original uploaded bytes, so the file can
+  be previewed/downloaded later), source_content_type, extracted_table
+  (nullable JSON — `{headers, rows}`), period_start, period_end.
+  `description` is the single field the AI comparison reads, regardless of
+  whether it was typed or extracted from a file.
 - **Evidence** — id, intern_id, source (pr/commit/mock), url, title,
   diff_stats (additions/deletions/files_changed/languages), review_iterations
   (proxy for learning from feedback), merged_at
@@ -169,12 +216,17 @@ sets directly.
 | Document extraction | `openpyxl`, `pypdf` (deterministic) + Gemini vision (OCR) | Excel/text-PDF/text files need no AI at all; only images and scanned PDFs need real OCR |
 | Git integration | GitHub REST API, per-user OAuth token | Each user's own token is used for their own evidence pulls — no shared/global GitHub session |
 | Email delivery | Generic SMTP (Gmail App Password is the simplest on-ramp) | Not locked to one vendor's API; degrades to showing the invite link directly in the manager UI if unconfigured |
+| Live progress | Server-Sent Events (`StreamingResponse`, no extra library) | One-directional server→client narration is all verdict generation needs; simpler than standing up WebSockets for it |
+| File storage | Uploaded learning-path files stored as a BLOB column in SQLite | Good enough at this scale to make "preview the original file" work without adding an object-storage dependency |
 | Containerization | Docker Compose, 2 services | Backend entrypoint self-heals a stale/interrupted seed (checks row counts, not just file existence) |
 
 **What was cut, deliberately, and stayed cut:** real webhooks (evidence is
 pulled on demand instead of via push events), Jira/ticket integration,
-multiple repos per intern, session revocation/refresh-token rotation,
-malware scanning on uploaded learning-path files.
+multiple repos per intern, malware scanning on uploaded learning-path files,
+and refresh-token rotation / a real revocation list — mentor/manager
+sessions still can't be individually invalidated early (only interns got a
+timeout, since that was the specific gap that mattered: a shared browser
+staying logged in as one intern indefinitely).
 
 ---
 
@@ -196,17 +248,30 @@ malware scanning on uploaded learning-path files.
 Everything below is built and demoable end-to-end, in both local dev and
 Docker Compose:
 
-- Full auth: GitHub OAuth signup for interns; manager-issued email invites
-  for mentors; promotion-only manager creation; dev-login backdoor for
-  testing.
+- Full auth: GitHub OAuth signup for interns (forced account picker every
+  login); manager-issued email invites for mentors; promotion-only manager
+  creation; a dynamic dev-login backdoor (roster fetched live, not
+  hardcoded) for testing; a short, server-enforced session timeout for
+  interns specifically.
 - Teams: manager creates them, assigns mentors into them, sees an org-wide
-  rollup distinct from any single mentor's dashboard.
+  rollup distinct from any single mentor's dashboard, with click-through
+  detail popups on every headline stat and an expandable
+  team → mentor → intern → learning-path tree inline on the same page.
+- Unassigned interns: visible and actionable from both the mentor dashboard
+  (self-claim) and the manager dashboard (directed assignment to any mentor
+  on one of the manager's teams).
 - Learning paths: typed, or extracted from an uploaded `.txt`/`.md`/`.xlsx`/
-  `.xls`/`.pdf`/image file, with a rendered table when the source had one.
+  `.xls`/`.pdf`/image file, with a rendered table when the source had one —
+  assignable by a mentor for their own interns, or by a manager for any
+  intern under their teams. The original uploaded file is stored and can be
+  previewed (images/PDF inline, text as readable text) or downloaded later.
 - Evidence pulls: real GitHub PRs/commits via each user's own token, or a
   deterministic synthetic generator with zero credentials.
-- AI verdicts: NVIDIA → Gemini → mock chain, provenance always visible.
-- Review queue, confirm/override, cohort and org-wide summaries with
+- AI verdicts: NVIDIA → Gemini → mock chain, provenance always visible,
+  generated (or rerun from scratch) with a live-narrated progress log
+  streamed over SSE instead of a blocking call behind a spinner.
+- Review queue, confirm/override, cohort summaries (per-mentor) and
+  org-wide summaries (per-manager, across every team they own) with
   Recharts visualizations.
 - Seed data that exercises the entire pipeline (manager, 2 mentors on 2
   teams, 3 interns, 6 learning paths, real evidence pulls, real verdicts)
@@ -246,6 +311,27 @@ evidence. Through the build, it grew into what's described above:
    own entity, letting a mentor hand over an existing syllabus file instead
    of retyping it was a natural extension, using the same AI provider chain
    already built for verdict generation.
+5. **Manager as a read-only rollup → manager as a working surface.** The
+   manager dashboard started as an aggregate view over what mentors did
+   elsewhere. It grew its own actions — assigning a file-based learning path
+   to any intern, rerunning a verdict, drilling into any of its headline
+   stats, routing an unassigned intern to a mentor — so a manager doesn't
+   have to switch into "acting as a mentor" to actually run the org.
+6. **Verdict generation as a black box → an observable process.** Generating
+   (or rerunning) a verdict now streams its own steps live over SSE instead
+   of hiding evidence-pull and AI-provider latency behind a bare spinner —
+   partly for user trust (you can see *which* provider actually answered and
+   why a rerun took as long as it did), partly because "rerun" only makes
+   sense as a feature once the user can tell it's actually doing something
+   different from the cached result.
+7. **Identity got safety rails.** Two gaps surfaced once the app had real
+   multi-user testing behind it: a shared browser could silently reuse
+   whoever last connected their GitHub account (fixed by forcing GitHub's
+   account picker on every login), and an intern's session never expired on
+   its own (fixed with a short, role-specific timeout mentors/managers don't
+   share). Neither changes the trust model — GitHub OAuth and email/invite
+   are still the only two ways in — they just close gaps that only became
+   visible once more than one person was actually using the same browser.
 
 Each step preserved the original core principle unchanged — AI correlates
 evidence, humans hold the judgment calls — while the surface area around it

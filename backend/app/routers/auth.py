@@ -85,6 +85,13 @@ def login():
             "redirect_uri": settings.github_oauth_redirect_uri,
             "scope": "repo read:user",
             "allow_signup": "true",
+            # Without this, GitHub silently reuses whatever GitHub account is
+            # already logged into the browser (skipping the login screen
+            # entirely if that account has already authorized this app) —
+            # which is wrong on a shared machine where a different intern
+            # wants to sign in with their own account. select_account forces
+            # GitHub's account picker to appear every time.
+            "prompt": "select_account",
         }
     )
     return RedirectResponse(f"{GITHUB_AUTHORIZE_URL}?{params}")
@@ -140,6 +147,29 @@ async def callback(code: str | None = None, error: str | None = None, db: Sessio
     redirect = RedirectResponse(_post_login_redirect(user, db))
     _issue_session(redirect, user.id)
     return redirect
+
+
+@router.get("/dev/users", response_model=list[schemas.DevLoginUser])
+def dev_login_users(db: Session = Depends(get_db)):
+    """Backs the landing page's dev-login panel with the actual current
+    roster instead of a hardcoded list — every manager/mentor (by email) and
+    intern (by github_login) that exists right now, so newly added mentors,
+    newly onboarded interns, etc. show up automatically. 404s (not just an
+    empty list) when dev login is disabled, matching /dev/login itself, so
+    a real deployment never exposes the user roster unauthenticated.
+    """
+    settings = get_settings()
+    if not settings.enable_dev_login:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    users = db.query(models.User).filter(models.User.role.isnot(None)).order_by(models.User.created_at).all()
+    result: list[schemas.DevLoginUser] = []
+    for u in users:
+        if u.email:
+            result.append(schemas.DevLoginUser(kind="email", email=u.email, label=u.name, role=u.role))
+        elif u.github_login:
+            result.append(schemas.DevLoginUser(kind="github", github_login=u.github_login, label=u.name, role=u.role))
+    return result
 
 
 @router.get("/dev/login")

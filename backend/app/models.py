@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Table,
     JSON,
+    LargeBinary,
 )
 from sqlalchemy.orm import relationship
 
@@ -146,6 +147,8 @@ class LearningPath(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=False)
     source_filename = Column(String, nullable=True)
+    source_file = Column(LargeBinary, nullable=True)  # original uploaded bytes, for the "preview file" UI
+    source_content_type = Column(String, nullable=True)
     extracted_table = Column(JSON, nullable=True)  # {"headers": [...], "rows": [[...], ...]}
     period_start = Column(Date, nullable=False)
     period_end = Column(Date, nullable=False)
@@ -154,6 +157,10 @@ class LearningPath(Base):
     intern = relationship("Intern", back_populates="learning_paths")
     mentor = relationship("User", foreign_keys=[mentor_id])
     verdict = relationship("Verdict", back_populates="learning_path", uselist=False, cascade="all, delete-orphan")
+
+    @property
+    def has_file(self) -> bool:
+        return self.source_file is not None
 
 
 class Evidence(Base):

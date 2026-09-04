@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, ClipboardCheck, ListTree, ShieldCheck, Users } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowRight, ClipboardCheck, Link2, ListTree, Loader2, ShieldCheck, UserPlus, Users } from "lucide-react";
 import { api } from "@/lib/api";
 import { AuthGate } from "@/components/AuthGate";
 import { StatCard } from "@/components/StatCard";
@@ -19,11 +19,25 @@ function initials(name: string) {
 }
 
 function MentorDashboard() {
+  const queryClient = useQueryClient();
   const { data: summary } = useQuery({ queryKey: ["cohort-summary"], queryFn: api.cohortSummary });
   const { data: interns } = useQuery({ queryKey: ["interns"], queryFn: api.listInterns });
+  const { data: unassignedInterns } = useQuery({
+    queryKey: ["unassigned-interns"],
+    queryFn: api.listUnassignedInterns,
+  });
   const { data: queue, isLoading } = useQuery({
     queryKey: ["review-queue"],
     queryFn: () => api.reviewQueue(),
+  });
+
+  const claim = useMutation({
+    mutationFn: (internId: number) => api.claimIntern(internId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["interns"] });
+      queryClient.invalidateQueries({ queryKey: ["unassigned-interns"] });
+      queryClient.invalidateQueries({ queryKey: ["cohort-summary"] });
+    },
   });
 
   return (
@@ -97,6 +111,47 @@ function MentorDashboard() {
           )}
         </div>
       </div>
+
+      {unassignedInterns && unassignedInterns.length > 0 && (
+        <div className="mt-8">
+          <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted">
+            <UserPlus size={14} /> Unassigned interns ({unassignedInterns.length})
+          </h2>
+          <p className="mt-1 text-xs text-muted">
+            These interns signed up without picking a mentor yet — claim one to add them to your roster.
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {unassignedInterns.map((intern) => (
+              <div
+                key={intern.id}
+                className="flex items-center justify-between gap-2 rounded-xl border border-dashed border-border bg-surface p-4 shadow-sm"
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className="flex h-9 w-9 items-center justify-center rounded-full text-xs font-semibold text-white"
+                    style={{ backgroundColor: "var(--color-accent)" }}
+                  >
+                    {initials(intern.name)}
+                  </span>
+                  <div>
+                    <div className="text-sm font-medium">{intern.name}</div>
+                    <div className="text-xs text-muted">@{intern.github_username}</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => claim.mutate(intern.id)}
+                  disabled={claim.isPending}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-60"
+                  style={{ backgroundColor: "var(--color-accent)" }}
+                >
+                  {claim.isPending ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />}
+                  Assign to me
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-8">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">

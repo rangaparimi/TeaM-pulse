@@ -33,14 +33,17 @@ mechanisms**, one per side of the org chart:
 - **Manager** — also email + password, but **promotion-only**: there's no
   "add yourself as manager" anywhere. An existing manager promotes an
   existing mentor (or you're seeded as the bootstrap manager). Creates
-  teams, adds mentors, promotes new managers, and sees an org-wide rollup.
-  The `/manager` page is deliberately styled differently (a gradient
-  admin-console header) from the mentor's plain dashboard, so the two are
-  never visually confused.
+  teams, adds mentors, promotes new managers, and sees an org-wide rollup —
+  including drilling into any intern's learning-path history and rerunning
+  their AI analysis, and assigning a file-based learning path directly,
+  without needing to *be* that intern's mentor. The `/manager` page is
+  deliberately styled differently (a gradient admin-console header) from
+  the mentor's plain dashboard, so the two are never visually confused.
 
 Hierarchy: a manager owns **Teams** → each **mentor** belongs to one team →
-each **intern** picks a mentor. An intern's displayed "team" is just
-whichever team their mentor is in — interns don't pick a team directly.
+each **intern** picks a mentor (or stays unassigned — see "Unassigned
+interns" below). An intern's displayed "team" is just whichever team their
+mentor is in — interns don't pick a team directly.
 
 ## How it works
 
@@ -52,18 +55,25 @@ whichever team their mentor is in — interns don't pick a team directly.
    designation, optional team. The mentor gets an invite link (emailed if
    SMTP is configured, shown directly to the manager otherwise) to set their
    password and log in.
-4. **Mentor assigns a learning path.** A title, a period, and either a typed
-   description **or an uploaded syllabus file** (text, Excel, PDF, or image)
-   — see "Uploading a learning path document" below.
-5. **Generate a progress summary.** Either the intern or their mentor can
-   trigger it: TeaM Pulse pulls PR/commit evidence for that repo and period,
-   summarizes it, and asks an AI model to compare it against the assigned
-   learning path — producing ON_TRACK / PARTIALLY_ON_TRACK / OFF_TRACK with a
-   confidence score and specific reasoning.
+4. **Mentor (or manager) assigns a learning path.** A title, a period, and
+   either a typed description **or an uploaded syllabus file** (text, Excel,
+   PDF, or image) — see "Uploading a learning path document" below. A
+   manager can do this for any intern under their teams too, not just their
+   own mentees.
+5. **Generate a progress summary.** The intern, their mentor, or a manager
+   can trigger it: TeaM Pulse pulls PR/commit evidence for that repo and
+   period, summarizes it, and asks an AI model to compare it against the
+   assigned learning path — producing ON_TRACK / PARTIALLY_ON_TRACK /
+   OFF_TRACK with a confidence score and specific reasoning, **narrated live**
+   as it happens (see "Watching the analysis run" below) rather than behind
+   a bare spinner. A verdict can also be **rerun** later, discarding the old
+   one and pulling fresh evidence.
 6. **Mentor reviews the queue.** Anything below the confidence threshold or
    flagged OFF_TRACK needs a human — confirm the AI's read or override it.
 7. **Manager oversees the org.** Creates teams, assigns mentors, promotes new
-   managers, and watches an aggregate on-track ratio across every team.
+   managers, watches an aggregate on-track ratio across every team, and can
+   click into any of the four headline stats (interns, teams, on-track %,
+   needs-review) for the full underlying detail instead of just the number.
 
 ## Uploading a learning path document
 
@@ -90,12 +100,63 @@ How extraction works depends on the file, in order of preference:
    asking you to configure it or upload a text-based file instead, rather
    than failing outright.
 
+The original uploaded file itself (not just the extracted text) is stored
+and can be re-opened later: a **"Preview"** link appears next to `(from
+filename.ext)` anywhere a file-based learning path is shown. Images and PDFs
+render inline in a popup; text/Markdown files show as readable text;
+Excel files (which browsers can't render) show a note pointing at the
+already-visible extracted table, plus a direct download link.
+
+## Watching the analysis run
+
+Clicking "Generate progress summary" (or "Re-run analysis" on an existing
+verdict) doesn't just spin — it streams a live, narrated log of each step as
+it happens over Server-Sent Events (`POST /verdicts/generate/stream`):
+loading the learning path, whether evidence was cached or freshly pulled
+from GitHub (and whether that pull was live or a mock fallback), which AI
+provider answered and its confidence, then saving the result. **Re-running**
+an existing verdict discards it and its cached evidence for that period
+first, so the rerun is a genuinely fresh pass, not a cache hit.
+
+## Unassigned interns
+
+An intern can finish onboarding without picking a mentor ("Unassigned —
+pick later"), or land unassigned via the dev-login shortcut. Rather than
+staying invisible, they show up in two places:
+
+- **Mentor dashboard** — an "Unassigned interns" section with an **"Assign
+  to me"** button per intern (`POST /interns/{id}/claim`), for self-service
+  claiming.
+- **Manager dashboard** — the same pool, org-wide, with a mentor picker per
+  intern so a manager can route someone to the right mentor on one of their
+  teams (`POST /admin/interns/{id}/assign-mentor`) without that mentor
+  having to notice and claim it themselves.
+
+## Manager dashboard: click-through detail
+
+Every stat on the manager dashboard (interns, teams, on-track %, needs
+review) is interactive, not decorative:
+
+- **Hover** shows a quick breakdown in a tooltip (e.g. interns per team, the
+  on-track/partial/off-track split).
+- **Click** opens a full popup with the real underlying data: an org-wide
+  interns table, an expanded team/mentor roster, the cohort verdict
+  distribution chart, or the actual list of verdicts needing review across
+  *every* team the manager owns (not just one mentor's queue).
+
+Teams themselves are also interactive: clicking a team header
+expands/collapses every mentor in it at once; clicking an individual
+mentor's name expands just their own interns, each of which can be expanded
+further into its full learning-path history with inline rerun controls —
+all without leaving `/manager`.
+
 ## Stack
 
 | Layer | Choice |
 |---|---|
 | Backend | FastAPI (Python) + SQLAlchemy + SQLite |
-| Auth | Two mechanisms, one session system: GitHub OAuth for interns (first login = signup), email+password for mentors/managers (added by a manager, invited by email, self-set password). A signed session cookie identifies the user on each request either way. Passwords are PBKDF2-HMAC-SHA256 hashed (stdlib only, no bcrypt dependency). |
+| Auth | Two mechanisms, one session system: GitHub OAuth for interns (first login = signup, and forces GitHub's account picker every time via `prompt=select_account` so a shared browser can't silently reuse the last intern's GitHub session), email+password for mentors/managers (added by a manager, invited by email, self-set password). A signed session cookie identifies the user on each request either way — interns get a short, configurable timeout (`INTERN_SESSION_MAX_AGE_MINUTES`, default 60) enforced server-side, distinct from mentors'/managers' much longer session. Passwords are PBKDF2-HMAC-SHA256 hashed (stdlib only, no bcrypt dependency). |
+| Live progress | Server-Sent Events for verdict generation/rerun — narrates each step (evidence lookup, AI provider call, save) instead of a bare loading spinner |
 | Email delivery | SMTP (works with any provider — Gmail with an App Password is the simplest) for mentor invite emails. If unconfigured, the invite link is still returned to the manager in the UI, so testing never depends on real email delivery. |
 | AI core (primary) | NVIDIA NIM — `nvidia/nemotron-3-super-120b-a12b` (a reasoning-tuned model) via the OpenAI-compatible `integrate.api.nvidia.com` endpoint. This task is calibrated judgment (compare two texts, emit a structured confidence + reasoning), not open-ended generation — a reasoning model's chain-of-thought (returned separately as `reasoning_content`, kept out of the stored verdict) tends to produce more consistent, well-justified confidence scores. Which models a given NVIDIA key can call varies by account entitlement, independent of what `/v1/models` lists — verify with a real chat-completions call before changing `NVIDIA_MODEL`. |
 | AI core (backup) | Google Gemini (`gemini-2.0-flash`) — used only if NVIDIA is unconfigured or a call to it fails |
@@ -186,12 +247,16 @@ The `/` page offers both real paths side by side, plus a dev-login panel:
    invite link is shown directly in the manager's UI instead — copy it and
    open it yourself (or send it however you like) to test the accept flow.
 3. **Dev login** (default on, `ENABLE_DEV_LOGIN=true`) — a "Dev login" panel
-   on the landing page lets you log in as any seeded demo user (by email for
-   mentors/managers, by GitHub-style username for interns), or type a new
-   username to create a fresh intern account instantly. This bypasses both
-   real auth mechanisms entirely — it does *not* fabricate mentor/manager
-   accounts, since those are meant to come from a real invite. Set
-   `ENABLE_DEV_LOGIN=false` in `.env` to remove this endpoint.
+   on the landing page lets you log in as **any user that currently exists**
+   (by email for mentors/managers, by GitHub-style username for interns),
+   grouped into Managers/Mentors/Interns, or type a new username to create a
+   fresh intern account instantly. This list is fetched live from
+   `GET /auth/dev/users` — it reflects whatever mentors/interns have actually
+   been added or onboarded, not a fixed seed snapshot. It bypasses both real
+   auth mechanisms entirely — it does *not* fabricate mentor/manager
+   accounts, since those are meant to come from a real invite. Both this
+   endpoint and `/auth/dev/login` 404 when `ENABLE_DEV_LOGIN=false`, so a
+   real deployment never exposes the user roster unauthenticated.
 
 Seeded demo accounts, password `changeme123` for all mentors/manager:
 `alex.rivera@teampulse.dev` (manager), `priya.singh@teampulse.dev`,
@@ -216,9 +281,18 @@ Seeded demo accounts, password `changeme123` for all mentors/manager:
 5. Back on **Mentor view**, anything OFF_TRACK or low-confidence is in the
    review queue with Confirm / Override.
 6. On the **manager dashboard**, promote a mentor to manager and notice the
-   distinct gradient header vs. the mentor view's plain layout.
-7. **Dev-log in as a brand-new intern** (any username) to see the full
-   first-time flow: connect a repo, pick a mentor, land on your dashboard.
+   distinct gradient header vs. the mentor view's plain layout. Click a team
+   to expand its mentors, click a mentor to see their interns, and click any
+   of the four header stats to drill into the full detail behind it.
+7. Expand an intern under a mentor and click **"Re-run analysis"** on an
+   existing verdict — watch the live narrated log as it discards the old
+   verdict and produces a fresh one.
+8. Pick a learning path that came from an uploaded file and click
+   **"Preview"** to see the original document, not just the extracted table.
+9. **Dev-log in as a brand-new intern** (any username) without picking a
+   mentor, then switch to a mentor's dashboard and **"Assign to me"** them
+   from the "Unassigned interns" section — or do the same from the manager
+   dashboard, routing them to whichever mentor you choose.
 
 ## Project layout
 
@@ -239,9 +313,13 @@ backend/
     github_service.py       GitHub REST evidence pulls + synthetic mock fallback
     llm_service.py           NVIDIA -> Gemini -> rule-based mock fallback chain
     document_service.py       learning-path file upload -> text/table extraction (+ Gemini OCR for images/scans)
-    routers/                 auth (GitHub + email/password + invites), admin (mentor
-                             invites, teams, promotion), users (intern onboarding),
-                             interns, learning_paths, evidence, verdicts, dashboard
+    routers/                 auth (GitHub + email/password + invites + dev-login
+                             roster), admin (mentor invites, teams, promotion,
+                             org-wide interns/review-queue/unassigned-intern
+                             routing), users (intern onboarding), interns
+                             (incl. unassigned list + self-claim), learning_paths
+                             (incl. file preview), evidence, verdicts (incl.
+                             SSE streaming generate/rerun), dashboard
     seed.py                   demo data generator, runs the full pipeline on seed
 frontend/
   Dockerfile             multi-stage build using Next.js standalone output
@@ -250,8 +328,14 @@ frontend/
                            redirect, mentor view (/mentor), manager view (/manager),
                            intern dashboard (/intern/[id])
     components/            AuthGate, AcceptInviteForm, VerdictCard, LearningPathForm,
-                           GenerateSummaryButton, ...
-    lib/                    typed API client, shared types, useAuth hook
+                           GenerateSummaryButton (rerun + live SSE log),
+                           AddLearningPathModal (manager quick-add, popup),
+                           FilePreviewModal (preview/download an uploaded file),
+                           ManagerInternPanel (expandable mentor → intern → learning
+                           path tree on /manager), StatDetailModal (click-through
+                           detail popups for the manager header stats), ...
+    lib/                    typed API client, shared types, useAuth hook (polls
+                           auth status so an expired intern session notices)
 ```
 
 ## Data model
@@ -259,7 +343,7 @@ frontend/
 - **User** — id, name, avatar_url, role (`intern`/`mentor`/`manager`/null until onboarded), team_id (mentors only); GitHub identity: github_id, github_login, github_access_token (interns); email identity: email, password_hash, employee_code, phone, designation, invite_token(+expiry) (mentors/managers)
 - **Team** — id, name, manager_id (→ User)
 - **Intern** — id, user_id, name, mentor_id (→ User), start_date, github_username, repo (team is derived: `intern.mentor.team_name`, not stored on Intern)
-- **LearningPath** — id, intern_id, mentor_id, title, description, source_filename, extracted_table, period_start, period_end
+- **LearningPath** — id, intern_id, mentor_id, title, description, source_filename, source_file (raw uploaded bytes, for preview/download), source_content_type, extracted_table, period_start, period_end
 - **Evidence** — id, intern_id, source (pr/commit/mock), url, title, diff_stats, review_iterations, merged_at
 - **Verdict** — id, learning_path_id, match_status (ON_TRACK/PARTIALLY_ON_TRACK/OFF_TRACK), confidence, ai_summary, reasoning, mentor_override
 - **SkillTag** — id, verdict_id, skill_name, evidence_strength
@@ -268,7 +352,15 @@ frontend/
 
 - An intern can only see/act on their own data.
 - A mentor can only see/act on interns who picked them as their mentor.
-- A manager can only see/act on teams they created, and (read-only, via the org rollup) interns under mentors in those teams.
+- A manager can see (and, unlike before, also *act on* — assign a learning
+  path, rerun a verdict) interns under mentors on teams they created, not
+  just read-only. They cannot act on interns outside their teams.
+- Claiming an unassigned intern is scoped: a mentor can only claim for
+  themselves; a manager can only route one to a mentor on one of their own
+  teams (never someone else's mentor).
+- An intern can never assign their own learning path, even though they can
+  read their own record — the mentor/manager-vs-evidence design would
+  collapse if self-assignment were allowed.
 - Enforced server-side on every route (`app/deps.py`), not just hidden in the UI.
 
 ## Known edge case
@@ -287,11 +379,12 @@ those interns to a different mentor first if you hit this in practice.
 
 ## Cut corners (by design, per the hackathon-MVP scope)
 
-- Session store is a signed cookie holding just a user id — no revocation list, no refresh-token rotation. Fine for a demo; a real deployment would want shorter-lived tokens and a way to invalidate sessions.
+- Session store is a signed cookie holding just a user id — no revocation list, no refresh-token rotation. Interns get a short server-enforced timeout (default 60 minutes); mentors/managers still get the full 30-day window with no way to invalidate a session early short of changing `SESSION_SECRET` (which logs out everyone at once).
 - No "forgot password" flow for email accounts — a manager would need to re-invite (a fresh invite token overwrites the old one) if a mentor forgets theirs.
 - No real webhooks — evidence is pulled on demand (generate-summary click, or manually via `POST /evidence/pull`), not via push events.
 - No Jira/ticket integration.
 - Single repo per intern (good enough for a demo; trivial to extend to a list).
 - Learning-path file uploads are capped at 10 MB and don't run malware/content scanning — fine for a trusted internal tool, not for accepting uploads from the public internet.
+- Uploaded files are stored as a BLOB column directly in SQLite (so "Preview" has something to serve back) rather than in object storage — fine at this scale, not how you'd do it with many large files.
 - Image/scanned-PDF OCR for learning paths hard-requires Gemini — if you only configure NVIDIA, those two file types fall back to a mock message rather than degrading to some other OCR method.
 - `ENABLE_DEV_LOGIN` defaults to on for easy testing — turn it off (`ENABLE_DEV_LOGIN=false`) before showing this to anyone you don't want logging in as anyone else.

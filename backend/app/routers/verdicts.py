@@ -1,7 +1,11 @@
 import asyncio
+import json
 from datetime import datetime
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import deps, github_service, llm_service, models, schemas
@@ -9,6 +13,8 @@ from app.config import get_settings
 from app.database import get_db
 
 router = APIRouter(prefix="/verdicts", tags=["verdicts"])
+
+PROVIDER_LABEL = {"nvidia": "NVIDIA", "gemini": "Gemini (backup)", "mock": "rule-based mock"}
 
 
 def _evidence_to_dict(e: models.Evidence) -> dict:
@@ -102,6 +108,148 @@ async def generate_verdict(
     db.commit()
     db.refresh(verdict)
     return verdict
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event)}\n\n"
+
+
+async def _stream_generate_verdict(
+    payload: schemas.GenerateVerdictRequest, db: Session, user: models.User
+) -> AsyncIterator[str]:
+    """Same flow as generate_verdict, but narrates each step as it happens
+    (evidence lookup/pull, which AI provider answered, etc.) so the caller
+    can render a live log instead of a bare spinner. `force=True` discards
+    an existing verdict and its cached evidence for the period, then reruns
+    from scratch — this is the "rerun" path.
+    """
+    try:
+        learning_path = db.get(models.LearningPath, payload.learning_path_id)
+        if not learning_path:
+            yield _sse({"type": "error", "message": "Learning path not found"})
+            return
+        intern = db.get(models.Intern, learning_path.intern_id)
+        deps.ensure_can_access_intern(user, intern)
+
+        yield _sse({"type": "log", "message": f'Loading learning path "{learning_path.title}" for {intern.name}…'})
+
+        if learning_path.verdict:
+            if not payload.force:
+                yield _sse({"type": "error", "message": "A progress summary already exists for this learning path"})
+                return
+            yield _sse({"type": "log", "message": "Discarding the previous verdict for a fresh rerun…"})
+            db.delete(learning_path.verdict)
+            db.commit()
+
+            stale_evidence = (
+                db.query(models.Evidence)
+                .filter(
+                    models.Evidence.intern_id == intern.id,
+                    models.Evidence.merged_at >= datetime.combine(learning_path.period_start, datetime.min.time()),
+                    models.Evidence.merged_at <= datetime.combine(learning_path.period_end, datetime.max.time()),
+                )
+                .all()
+            )
+            for row in stale_evidence:
+                db.delete(row)
+            db.commit()
+
+        if not intern.repo:
+            yield _sse({"type": "error", "message": "This intern hasn't connected a repo yet"})
+            return
+
+        evidence_rows = (
+            db.query(models.Evidence)
+            .filter(
+                models.Evidence.intern_id == intern.id,
+                models.Evidence.merged_at >= datetime.combine(learning_path.period_start, datetime.min.time()),
+                models.Evidence.merged_at <= datetime.combine(learning_path.period_end, datetime.max.time()),
+            )
+            .all()
+        )
+
+        if evidence_rows:
+            yield _sse({"type": "log", "message": f"Found {len(evidence_rows)} cached evidence item(s) for this period."})
+        else:
+            yield _sse(
+                {"type": "log", "message": f"Pulling GitHub evidence for {intern.repo} ({learning_path.period_start} → {learning_path.period_end})…"}
+            )
+            token = deps.resolve_github_token(intern, db)
+            raw_evidence, mode = await github_service.pull_evidence(
+                intern.repo, intern.github_username, learning_path.period_start, learning_path.period_end, token
+            )
+            source_note = "live GitHub API" if mode == "live" else "mock fallback (no GitHub token available)"
+            yield _sse({"type": "log", "message": f"{source_note} returned {len(raw_evidence)} item(s)."})
+            for item in raw_evidence:
+                merged_at = None
+                if item.get("merged_at"):
+                    merged_at = datetime.fromisoformat(item["merged_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+                row = models.Evidence(
+                    intern_id=intern.id,
+                    source=item["source"],
+                    url=item["url"],
+                    title=item["title"],
+                    diff_stats=item["diff_stats"],
+                    review_iterations=item["review_iterations"],
+                    merged_at=merged_at,
+                )
+                db.add(row)
+                evidence_rows.append(row)
+            db.commit()
+            for row in evidence_rows:
+                db.refresh(row)
+
+        evidence_dicts = [_evidence_to_dict(e) for e in evidence_rows]
+
+        yield _sse({"type": "log", "message": "Sending evidence + learning path to the AI provider chain (NVIDIA → Gemini → mock)…"})
+        summary, verdict_data, provider = await asyncio.to_thread(
+            llm_service.generate_verdict, learning_path.description, evidence_dicts
+        )
+        label = PROVIDER_LABEL.get(provider, provider)
+        status = str(verdict_data["match_status"]).replace("_", " ").title()
+        confidence_pct = round(float(verdict_data["confidence"]) * 100)
+        yield _sse({"type": "log", "message": f"{label} responded: {status} at {confidence_pct}% confidence."})
+
+        yield _sse({"type": "log", "message": "Saving verdict and skill tags…"})
+        verdict = models.Verdict(
+            learning_path_id=learning_path.id,
+            match_status=verdict_data["match_status"],
+            confidence=float(verdict_data["confidence"]),
+            ai_summary=summary["summary"],
+            reasoning=verdict_data["reasoning"],
+            source_mode=provider,
+        )
+        verdict.evidence = evidence_rows
+        db.add(verdict)
+        db.flush()
+
+        for tag in verdict_data.get("skill_tags", []):
+            db.add(
+                models.SkillTag(
+                    verdict_id=verdict.id,
+                    skill_name=tag["skill_name"],
+                    evidence_strength=float(tag["evidence_strength"]),
+                )
+            )
+
+        db.commit()
+        db.refresh(verdict)
+
+        yield _sse({"type": "log", "message": "Done."})
+        yield _sse({"type": "result", "verdict": jsonable_encoder(schemas.VerdictOut.model_validate(verdict))})
+    except HTTPException as exc:
+        yield _sse({"type": "error", "message": str(exc.detail)})
+    except Exception as exc:  # last-resort guard so the stream always terminates cleanly
+        yield _sse({"type": "error", "message": str(exc)})
+
+
+@router.post("/generate/stream")
+async def generate_verdict_stream(
+    payload: schemas.GenerateVerdictRequest,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(deps.get_current_user),
+):
+    return StreamingResponse(_stream_generate_verdict(payload, db, user), media_type="text/event-stream")
 
 
 @router.get("", response_model=list[schemas.VerdictOut])

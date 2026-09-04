@@ -22,6 +22,18 @@ class UserOut(BaseModel):
     pending_invite: Optional[bool] = None
 
 
+class DevLoginUser(BaseModel):
+    """One entry in the dev-login panel on the landing page — only ever
+    returned when ENABLE_DEV_LOGIN is set, so real deployments never expose
+    the user roster unauthenticated."""
+
+    kind: str  # "email" | "github"
+    label: str
+    role: str
+    email: Optional[str] = None
+    github_login: Optional[str] = None
+
+
 class MentorCreate(BaseModel):
     name: str
     email: str
@@ -94,6 +106,10 @@ class AssignMentorTeam(BaseModel):
     team_id: Optional[int] = Field(description="null removes the mentor from any team")
 
 
+class AssignInternMentor(BaseModel):
+    mentor_id: int
+
+
 class LearningPathCreate(BaseModel):
     intern_id: int
     title: str
@@ -116,6 +132,7 @@ class LearningPathOut(BaseModel):
     title: str
     description: str
     source_filename: Optional[str] = None
+    has_file: bool = False
     extracted_table: Optional[LearningPathTable] = None
     period_start: date
     period_end: date
@@ -176,6 +193,7 @@ class VerdictOut(BaseModel):
 
 class GenerateVerdictRequest(BaseModel):
     learning_path_id: int
+    force: bool = Field(default=False, description="Re-run even if a verdict already exists, discarding the old one")
 
 
 class CohortSummary(BaseModel):

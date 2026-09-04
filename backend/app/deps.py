@@ -1,4 +1,6 @@
-from fastapi import Depends, HTTPException, Request
+from datetime import datetime, timedelta, timezone
+
+from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app import models
@@ -7,15 +9,29 @@ from app.database import get_db
 from app.session import read_session_token
 
 
-def get_current_user_optional(request: Request, db: Session = Depends(get_db)) -> models.User | None:
+def get_current_user_optional(
+    request: Request, response: Response, db: Session = Depends(get_db)
+) -> models.User | None:
     settings = get_settings()
     token = request.cookies.get(settings.session_cookie_name)
     if not token:
         return None
-    user_id = read_session_token(token)
-    if not user_id:
+    decoded = read_session_token(token)
+    if not decoded:
         return None
-    return db.get(models.User, user_id)
+    user_id, issued_at = decoded
+    user = db.get(models.User, user_id)
+    if not user:
+        return None
+
+    if user.role == "intern":
+        issued_at_naive = issued_at.astimezone(timezone.utc).replace(tzinfo=None)
+        session_age = datetime.utcnow() - issued_at_naive
+        if session_age > timedelta(minutes=settings.intern_session_max_age_minutes):
+            response.delete_cookie(settings.session_cookie_name)
+            return None
+
+    return user
 
 
 def get_current_user(user: models.User | None = Depends(get_current_user_optional)) -> models.User:

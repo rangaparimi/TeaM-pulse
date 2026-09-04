@@ -76,6 +76,7 @@ export interface LearningPath {
   title: string;
   description: string;
   source_filename: string | null;
+  has_file: boolean;
   extracted_table: LearningPathTable | null;
   period_start: string;
   period_end: string;
@@ -134,6 +135,15 @@ export interface TimelineEntry {
   learning_path: LearningPath;
   verdict: Verdict | null;
 }
+
+export type DemoLogin =
+  | { kind: "email"; email: string; label: string; role: string }
+  | { kind: "github"; github_login: string; label: string; role: string };
+
+export type VerdictStreamEvent =
+  | { type: "log"; message: string }
+  | { type: "error"; message: string }
+  | { type: "result"; verdict: Verdict };
 
 export interface CohortSummary {
   total_interns: number;
